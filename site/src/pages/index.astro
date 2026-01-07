@@ -5,8 +5,9 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>td — simple task tracker</title>
+    <title>td — task tracker for AI agents</title>
     <meta name="description" content="SQLite task tracker for AI agents. Single bash script." />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <style>
       * { margin: 0; padding: 0; box-sizing: border-box; }
       
@@ -15,18 +16,22 @@
         --fg: #111;
         --muted: #666;
         --border: #e5e5e5;
-        --code-bg: #f5f5f5;
+        --code-bg: #f7f7f7;
+        --code-fg: #111;
+        --green: #22863a;
         --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
         --mono: ui-monospace, "SF Mono", Menlo, monospace;
       }
       
       @media (prefers-color-scheme: dark) {
         :root {
-          --bg: #111;
-          --fg: #eee;
-          --muted: #888;
-          --border: #333;
-          --code-bg: #1a1a1a;
+          --bg: #0d1117;
+          --fg: #e6edf3;
+          --muted: #8b949e;
+          --border: #30363d;
+          --code-bg: #161b22;
+          --code-fg: #e6edf3;
+          --green: #7ee787;
         }
       }
       
@@ -34,7 +39,7 @@
         font-family: var(--font);
         background: var(--bg);
         color: var(--fg);
-        font-size: 24px;
+        font-size: 22px;
         line-height: 1.5;
       }
       
@@ -43,67 +48,111 @@
         display: flex;
         align-items: center;
         justify-content: center;
+        padding: 3rem 2rem;
       }
       
       main {
         width: 100%;
-        max-width: 640px;
-        padding: 3rem;
+        max-width: 720px;
       }
       
       h1 {
-        font-size: 3rem;
+        font-size: 2.5rem;
         font-weight: 600;
-        margin-bottom: 1.5rem;
-      }
-      
-      p {
-        color: var(--muted);
         margin-bottom: 1rem;
       }
       
-      p:last-of-type {
-        margin-bottom: 1.5rem;
+      .intro {
+        color: var(--muted);
+        margin-bottom: 2rem;
       }
       
-      code {
-        font-family: var(--mono);
-        font-size: 0.875rem;
-        background: var(--code-bg);
-        padding: 0.15rem 0.35rem;
-        border-radius: 3px;
-      }
+      .intro a { color: var(--fg); }
       
       .install {
         display: block;
         background: var(--code-bg);
-        border-radius: 6px;
-        padding: 0.75rem 1rem;
-        margin-bottom: 1.5rem;
+        border-radius: 8px;
+        padding: 1rem 1.25rem;
+        margin-bottom: 2.5rem;
         font-family: var(--mono);
         font-size: 0.8rem;
-        word-break: break-all;
+        color: var(--code-fg);
+        overflow-x: auto;
+      }
+      
+      .examples {
+        background: var(--code-bg);
+        border-radius: 8px;
+        padding: 1.25rem 1.5rem;
+        margin-bottom: 2rem;
+        font-family: var(--mono);
+        font-size: 0.75rem;
+        line-height: 1.8;
+      }
+      
+      .examples .line {
+        display: flex;
+        gap: 1rem;
+      }
+      
+      .examples .cmd {
+        color: var(--green);
+        min-width: 320px;
+      }
+      
+      .examples .comment {
+        color: var(--muted);
+      }
+      
+      .note {
+        color: var(--muted);
+        font-size: 0.9rem;
+        margin-bottom: 2rem;
+      }
+      
+      .note code {
+        font-family: var(--mono);
+        background: var(--code-bg);
+        padding: 0.15rem 0.4rem;
+        border-radius: 4px;
+        font-size: 0.85rem;
       }
       
       footer {
         color: var(--muted);
-        font-size: 0.875rem;
+        font-size: 0.8rem;
       }
       
-      a { color: var(--fg); }
+      footer a { color: var(--fg); }
+      
+      @media (max-width: 600px) {
+        html { font-size: 18px; }
+        body { padding: 2rem 1.5rem; align-items: flex-start; padding-top: 3rem; }
+        .examples .line { flex-direction: column; gap: 0; margin-bottom: 0.5rem; }
+        .examples .cmd { min-width: auto; }
+        .examples .comment { margin-left: 1rem; }
+      }
     </style>
   </head>
   <body>
     <main>
       <h1>td</h1>
       
-      <p>A task tracker for AI coding agents. I liked <a href="https://github.com/steveyegge/beads">beads</a>, but it became more than I wanted. So I made this.</p>
-      
-      <p>One bash script. SQLite. No setup.</p>
+      <p class="intro">A task tracker for AI coding agents. I liked <a href="https://github.com/steveyegge/beads">beads</a>, but it became more than I wanted. So I made this. One bash script. SQLite. No setup.</p>
       
       <code class="install">curl -fsSL https://raw.githubusercontent.com/alosec/td-world/main/install.sh | bash</code>
       
-      <p>Also includes <code>tv</code>, an fzf viewer.</p>
+      <div class="examples">
+        <div class="line"><span class="cmd">td create "fix auth bug" -p 1</span><span class="comment"># priority 1</span></div>
+        <div class="line"><span class="cmd">td list</span><span class="comment"># show all</span></div>
+        <div class="line"><span class="cmd">td move fix-a1b2 in-progress</span><span class="comment"># change status</span></div>
+        <div class="line"><span class="cmd">td close fix-a1b2</span><span class="comment"># done</span></div>
+        <div class="line"><span class="cmd">td dep add fix-a1b2 api-c3d4</span><span class="comment"># blocked by</span></div>
+        <div class="line"><span class="cmd">td ready</span><span class="comment"># unblocked tasks</span></div>
+      </div>
+      
+      <p class="note">Also installs <code>tv</code> — an fzf viewer with table and kanban modes.</p>
       
       <footer><a href="https://github.com/alosec/td-world">GitHub</a></footer>
     </main>

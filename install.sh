@@ -1,17 +1,30 @@
 #!/bin/bash
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# td-world installer
+# Downloads td and tv to ~/.local/bin
+
 BIN_DIR="${HOME}/.local/bin"
+REPO="https://raw.githubusercontent.com/alosec/td-world/main/bin"
 
 mkdir -p "$BIN_DIR"
 
-# Symlink td and tv
-ln -sf "$SCRIPT_DIR/bin/td" "$BIN_DIR/td"
-ln -sf "$SCRIPT_DIR/bin/tv" "$BIN_DIR/tv"
+echo "Installing td..."
+curl -fsSL "$REPO/td" -o "$BIN_DIR/td"
+chmod +x "$BIN_DIR/td"
 
-echo "Installed:"
-echo "  td -> $SCRIPT_DIR/bin/td"
-echo "  tv -> $SCRIPT_DIR/bin/tv"
+echo "Installing tv..."
+curl -fsSL "$REPO/tv" -o "$BIN_DIR/tv"
+chmod +x "$BIN_DIR/tv"
+
 echo ""
-echo "Make sure $BIN_DIR is in your PATH"
+echo "Installed to $BIN_DIR"
+echo "  td - task tracker"
+echo "  tv - fzf viewer"
+echo ""
+
+# Check if in PATH
+if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
+  echo "Add to your shell config:"
+  echo "  export PATH=\"\$HOME/.local/bin:\$PATH\""
+fi

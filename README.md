@@ -8,15 +8,13 @@ Monorepo for the `td` task tracking ecosystem.
 |-----------|-------------|
 | `bin/td`  | SQLite-based task tracker CLI |
 | `bin/tv`  | fzf-powered TUI viewer for td |
-| `site/`   | Landing page (Astro, td.new) |
+| `site/`   | Landing page at [tdtask.com](https://tdtask.com) |
 
 ## Install
 
 ```bash
-./install.sh
+curl -fsSL https://raw.githubusercontent.com/alosec/td-world/main/install.sh | bash
 ```
-
-This symlinks `td` and `tv` to `~/.local/bin/`.
 
 ## Usage
 

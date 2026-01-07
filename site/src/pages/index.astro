@@ -1,0 +1,414 @@
+---
+---
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>td</title>
+    <meta name="description" content="Todo tracker for AI agents. 409 lines. 13ms." />
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      
+      :root {
+        --bg: #fff;
+        --fg: #000;
+        --muted: #666;
+        --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+        --mono: ui-monospace, "Cascadia Code", "SF Mono", Menlo, Consolas, monospace;
+      }
+      
+      [data-theme="dark"] {
+        --bg: #000;
+        --fg: #fff;
+        --muted: #888;
+      }
+      
+      html {
+        font-family: var(--font);
+        background: var(--bg);
+        color: var(--fg);
+        font-size: clamp(18px, 2.5vw, 22px);
+        line-height: 1.5;
+        transition: background 0.3s, color 0.3s;
+      }
+      
+      body {
+        min-height: 100vh;
+        padding: calc(8vh + 1rem) calc(6vw + 1rem);
+        max-width: 1200px;
+        margin: 0 auto;
+      }
+      
+      .toggle {
+        position: fixed;
+        top: 2rem;
+        right: 2rem;
+        font-size: 1.5rem;
+        background: none;
+        border: none;
+        cursor: pointer;
+        padding: 0.5rem;
+        z-index: 100;
+      }
+      
+      #canvas-container {
+        width: 100%;
+        height: 40vh;
+        min-height: 300px;
+        margin-bottom: 4rem;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      
+      #ascii-canvas {
+        width: 100%;
+        height: 100%;
+      }
+      
+      h1 {
+        font-family: var(--mono);
+        font-size: clamp(4rem, 15vw, 12rem);
+        font-weight: 400;
+        letter-spacing: -0.05em;
+        margin-bottom: 1rem;
+      }
+      
+      .subtitle {
+        font-size: 1.2rem;
+        color: var(--muted);
+        margin-bottom: 4rem;
+        letter-spacing: 0.2em;
+        text-transform: uppercase;
+      }
+      
+      .stats {
+        display: flex;
+        gap: 4rem;
+        margin-bottom: 4rem;
+        flex-wrap: wrap;
+      }
+      
+      .stat {
+        display: flex;
+        flex-direction: column;
+      }
+      
+      .stat-value {
+        font-family: var(--mono);
+        font-size: clamp(2rem, 5vw, 3.5rem);
+        font-weight: 400;
+        line-height: 1;
+      }
+      
+      .stat-label {
+        font-size: 0.8rem;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.15em;
+        margin-top: 0.5rem;
+      }
+      
+      .install {
+        font-family: var(--mono);
+        font-size: clamp(0.7rem, 2vw, 1rem);
+        padding: 1.5rem 2rem;
+        background: var(--fg);
+        color: var(--bg);
+        display: inline-block;
+        margin-bottom: 4rem;
+        word-break: break-all;
+      }
+      
+      .commands {
+        font-family: var(--mono);
+        font-size: clamp(0.8rem, 1.8vw, 1rem);
+        line-height: 2;
+        margin-bottom: 4rem;
+      }
+      
+      .cmd {
+        opacity: 1;
+      }
+      
+      .cmt {
+        color: var(--muted);
+      }
+      
+      footer {
+        display: flex;
+        gap: 2rem;
+        flex-wrap: wrap;
+        padding-top: 2rem;
+        border-top: 1px solid var(--fg);
+      }
+      
+      a {
+        color: var(--fg);
+        text-decoration: none;
+        text-transform: uppercase;
+        letter-spacing: 0.1em;
+        font-size: 0.85rem;
+      }
+      
+      a:hover {
+        text-decoration: underline;
+      }
+      
+      @media (max-width: 600px) {
+        body {
+          padding: 4vh 5vw;
+        }
+        
+        .toggle {
+          top: 1rem;
+          right: 1rem;
+        }
+        
+        .stats {
+          gap: 2rem;
+        }
+        
+        #canvas-container {
+          height: 30vh;
+          min-height: 200px;
+        }
+        
+        .install {
+          padding: 1rem 1.25rem;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <button class="toggle" id="theme-toggle" aria-label="Toggle theme">◐</button>
+    
+    <div id="canvas-container">
+      <canvas id="ascii-canvas"></canvas>
+    </div>
+    
+    <h1>td</h1>
+    <p class="subtitle">Todo for Agents</p>
+    
+    <div class="stats">
+      <div class="stat">
+        <span class="stat-value">409</span>
+        <span class="stat-label">Lines of Code</span>
+      </div>
+      <div class="stat">
+        <span class="stat-value">13ms</span>
+        <span class="stat-label">Response Time</span>
+      </div>
+      <div class="stat">
+        <span class="stat-value">0</span>
+        <span class="stat-label">Dependencies</span>
+      </div>
+    </div>
+    
+    <code class="install">curl -fsSL https://raw.githubusercontent.com/alosec/td/main/install.sh | bash</code>
+    
+    <div class="commands">
+      <div><span class="cmd">td init</span> <span class="cmt">— initialize</span></div>
+      <div><span class="cmd">td create "task" -p 0</span> <span class="cmt">— create priority 0</span></div>
+      <div><span class="cmd">td ready</span> <span class="cmt">— unblocked tasks</span></div>
+      <div><span class="cmd">td done td-a1b2</span> <span class="cmt">— complete</span></div>
+    </div>
+    
+    <footer>
+      <a href="https://github.com/alosec/td">GitHub</a>
+      <a href="https://github.com/alosec/td#commands">Documentation</a>
+      <a href="https://github.com/alosec/td/blob/main/td">Source</a>
+    </footer>
+    
+    <script>
+      // Theme toggle
+      const toggle = document.getElementById('theme-toggle');
+      const html = document.documentElement;
+      
+      const saved = localStorage.getItem('theme');
+      if (saved) {
+        html.dataset.theme = saved;
+        toggle.textContent = saved === 'dark' ? '◑' : '◐';
+      } else if (window.matchMedia('(prefers-color-scheme: dark)').matches) {
+        html.dataset.theme = 'dark';
+        toggle.textContent = '◑';
+      }
+      
+      toggle.addEventListener('click', () => {
+        const isDark = html.dataset.theme === 'dark';
+        html.dataset.theme = isDark ? 'light' : 'dark';
+        toggle.textContent = isDark ? '◐' : '◑';
+        localStorage.setItem('theme', html.dataset.theme);
+        updateColors();
+      });
+      
+      // ASCII Three.js renderer
+      const canvas = document.getElementById('ascii-canvas');
+      const container = document.getElementById('canvas-container');
+      
+      // ASCII characters from dark to light
+      const ASCII_CHARS = ' .:-=+*#%@';
+      
+      let scene, camera, renderer, geometry, points;
+      let width, height, cols, rows;
+      let ctx;
+      let animationId;
+      
+      function getColors() {
+        const isDark = html.dataset.theme === 'dark';
+        return {
+          bg: isDark ? '#000' : '#fff',
+          fg: isDark ? '#fff' : '#000'
+        };
+      }
+      
+      function init() {
+        const dpr = Math.min(window.devicePixelRatio, 2);
+        width = container.clientWidth;
+        height = container.clientHeight;
+        
+        canvas.width = width * dpr;
+        canvas.height = height * dpr;
+        canvas.style.width = width + 'px';
+        canvas.style.height = height + 'px';
+        
+        ctx = canvas.getContext('2d');
+        ctx.scale(dpr, dpr);
+        
+        // Calculate grid
+        const fontSize = Math.max(10, Math.min(14, width / 60));
+        ctx.font = `${fontSize}px ui-monospace, monospace`;
+        const charWidth = ctx.measureText('M').width;
+        const charHeight = fontSize * 1.2;
+        
+        cols = Math.floor(width / charWidth);
+        rows = Math.floor(height / charHeight);
+        
+        // Three.js scene
+        scene = new THREE.Scene();
+        camera = new THREE.PerspectiveCamera(75, width / height, 0.1, 1000);
+        camera.position.z = 30;
+        
+        // Create torus knot geometry
+        const torusGeometry = new THREE.TorusKnotGeometry(10, 3, 100, 16);
+        const positions = torusGeometry.attributes.position.array;
+        
+        // Sample points from geometry
+        const pointsArray = [];
+        for (let i = 0; i < positions.length; i += 9) {
+          pointsArray.push(new THREE.Vector3(positions[i], positions[i+1], positions[i+2]));
+        }
+        
+        geometry = new THREE.BufferGeometry().setFromPoints(pointsArray);
+        const material = new THREE.PointsMaterial({ size: 0.5 });
+        points = new THREE.Points(geometry, material);
+        scene.add(points);
+        
+        // Hidden WebGL renderer for depth
+        renderer = new THREE.WebGLRenderer({ antialias: false });
+        renderer.setSize(cols, rows);
+        
+        animate();
+      }
+      
+      function updateColors() {
+        // Colors update automatically via CSS variables in render
+      }
+      
+      function animate() {
+        animationId = requestAnimationFrame(animate);
+        
+        points.rotation.x += 0.003;
+        points.rotation.y += 0.005;
+        
+        render();
+      }
+      
+      function render() {
+        const colors = getColors();
+        const fontSize = Math.max(10, Math.min(14, width / 60));
+        const charWidth = ctx.measureText('M').width;
+        const charHeight = fontSize * 1.2;
+        
+        // Clear
+        ctx.fillStyle = colors.bg;
+        ctx.fillRect(0, 0, width, height);
+        
+        // Get projected points
+        const projected = [];
+        const positions = geometry.attributes.position.array;
+        
+        for (let i = 0; i < positions.length; i += 3) {
+          const vertex = new THREE.Vector3(positions[i], positions[i+1], positions[i+2]);
+          vertex.applyMatrix4(points.matrixWorld);
+          vertex.project(camera);
+          
+          const x = (vertex.x + 1) / 2 * cols;
+          const y = (-vertex.y + 1) / 2 * rows;
+          const z = vertex.z;
+          
+          if (z > 0 && z < 1) {
+            projected.push({ x, y, z });
+          }
+        }
+        
+        // Create depth buffer
+        const depthBuffer = new Array(cols * rows).fill(1);
+        
+        for (const p of projected) {
+          const col = Math.floor(p.x);
+          const row = Math.floor(p.y);
+          if (col >= 0 && col < cols && row >= 0 && row < rows) {
+            const idx = row * cols + col;
+            if (p.z < depthBuffer[idx]) {
+              depthBuffer[idx] = p.z;
+            }
+          }
+        }
+        
+        // Render ASCII
+        ctx.fillStyle = colors.fg;
+        ctx.font = `${fontSize}px ui-monospace, monospace`;
+        
+        for (let row = 0; row < rows; row++) {
+          for (let col = 0; col < cols; col++) {
+            const idx = row * cols + col;
+            const depth = depthBuffer[idx];
+            
+            if (depth < 1) {
+              // Map depth to ASCII character
+              const brightness = 1 - depth;
+              const charIdx = Math.floor(brightness * (ASCII_CHARS.length - 1));
+              const char = ASCII_CHARS[Math.min(charIdx, ASCII_CHARS.length - 1)];
+              
+              if (char !== ' ') {
+                ctx.fillText(char, col * charWidth, row * charHeight + fontSize);
+              }
+            }
+          }
+        }
+      }
+      
+      // Import Three.js
+      const script = document.createElement('script');
+      script.src = 'https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js';
+      script.onload = init;
+      document.head.appendChild(script);
+      
+      // Resize handler
+      let resizeTimeout;
+      window.addEventListener('resize', () => {
+        clearTimeout(resizeTimeout);
+        resizeTimeout = setTimeout(() => {
+          cancelAnimationFrame(animationId);
+          init();
+        }, 200);
+      });
+    </script>
+  </body>
+</html>

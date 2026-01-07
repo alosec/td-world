@@ -1,0 +1,884 @@
+#!/usr/bin/env bash
+# td - Todo tracker for AI agents
+# Implementation: SQLite (global db, project-scoped, Linear-like workflow)
+# Target: <1k LOC, <100ms response time
+set -euo pipefail
+
+VERSION="0.4.0"
+TD_DIR="$HOME/.td"
+DB_FILE="$TD_DIR/tasks.db"
+
+# Colors
+if [[ -z "${NO_COLOR:-}" ]] && [[ -t 1 ]]; then
+  RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'
+  BLUE='\033[0;34m'; CYAN='\033[0;36m'; GRAY='\033[0;90m'
+  BOLD='\033[1m'; NC='\033[0m'
+else
+  RED=''; GREEN=''; YELLOW=''; BLUE=''; CYAN=''; GRAY=''; BOLD=''; NC=''
+fi
+
+die() { echo -e "${RED}error:${NC} $1" >&2; exit 1; }
+info() { echo -e "${BLUE}info:${NC} $1" >&2; }
+
+get_project() {
+  echo "${TD_PROJECT:-$(basename "$PWD")}"
+}
+
+gen_id() {
+  local proj=$(get_project)
+  local prefix=$(echo "$proj" | head -c 3 | tr '[:upper:]' '[:lower:]')
+  echo "${prefix}-$(echo "$(date +%s%N)$$" | sha256sum | head -c 4)"
+}
+
+now() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
+
+ensure_db() {
+  [[ -d "$TD_DIR" ]] || mkdir -p "$TD_DIR"
+  [[ -f "$DB_FILE" ]] || init_db
+  auto_migrate
+}
+
+sql_json() { sqlite3 "$DB_FILE" "$1"; }
+sql_exec() { sqlite3 "$DB_FILE" <<< "$1"; }
+
+init_db() {
+  sqlite3 "$DB_FILE" << 'SQL'
+-- Workflow states (Linear-style)
+CREATE TABLE statuses (
+  id INTEGER PRIMARY KEY,
+  project TEXT NOT NULL,
+  name TEXT NOT NULL,
+  type TEXT NOT NULL CHECK (type IN ('backlog', 'unstarted', 'started', 'completed', 'canceled')),
+  color TEXT DEFAULT '',
+  position INTEGER NOT NULL,
+  UNIQUE (project, name)
+);
+
+CREATE TABLE projects (
+  name TEXT PRIMARY KEY,
+  path TEXT,
+  created TEXT NOT NULL
+);
+
+CREATE TABLE tasks (
+  id TEXT PRIMARY KEY,
+  project TEXT NOT NULL,
+  title TEXT NOT NULL,
+  description TEXT DEFAULT '',
+  type TEXT DEFAULT 'task',
+  priority INTEGER DEFAULT 2,
+  status TEXT NOT NULL,
+  parent TEXT DEFAULT '',
+  close_reason TEXT DEFAULT '',
+  created TEXT NOT NULL,
+  updated TEXT NOT NULL,
+  FOREIGN KEY (project) REFERENCES projects(name)
+);
+
+CREATE TABLE labels (
+  task_id TEXT,
+  label TEXT,
+  PRIMARY KEY (task_id, label),
+  FOREIGN KEY (task_id) REFERENCES tasks(id)
+);
+
+CREATE TABLE blockers (
+  task_id TEXT,
+  blocker_id TEXT,
+  PRIMARY KEY (task_id, blocker_id),
+  FOREIGN KEY (task_id) REFERENCES tasks(id)
+);
+
+CREATE TABLE comments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id TEXT NOT NULL,
+  body TEXT NOT NULL,
+  created TEXT NOT NULL,
+  FOREIGN KEY (task_id) REFERENCES tasks(id)
+);
+
+CREATE INDEX idx_project ON tasks(project);
+CREATE INDEX idx_status ON tasks(status);
+CREATE INDEX idx_priority ON tasks(priority);
+CREATE INDEX idx_parent ON tasks(parent);
+CREATE INDEX idx_comments_task ON comments(task_id);
+SQL
+  info "initialized global db at $DB_FILE"
+}
+
+auto_migrate() {
+  # Add statuses table if missing
+  local has_statuses=$(sql_exec "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='statuses';")
+  if [[ "$has_statuses" -eq 0 ]]; then
+    sql_exec "CREATE TABLE statuses (
+      id INTEGER PRIMARY KEY,
+      project TEXT NOT NULL,
+      name TEXT NOT NULL,
+      type TEXT NOT NULL CHECK (type IN ('backlog', 'unstarted', 'started', 'completed', 'canceled')),
+      color TEXT DEFAULT '',
+      position INTEGER NOT NULL,
+      UNIQUE (project, name)
+    );"
+  fi
+  
+  # Add projects table if missing
+  local has_projects=$(sql_exec "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='projects';")
+  if [[ "$has_projects" -eq 0 ]]; then
+    sql_exec "CREATE TABLE projects (name TEXT PRIMARY KEY, path TEXT, created TEXT NOT NULL);"
+  fi
+  
+  # Add comments table if missing
+  local has_comments=$(sql_exec "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='comments';")
+  if [[ "$has_comments" -eq 0 ]]; then
+    sql_exec "CREATE TABLE comments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      task_id TEXT NOT NULL,
+      body TEXT NOT NULL,
+      created TEXT NOT NULL,
+      FOREIGN KEY (task_id) REFERENCES tasks(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_comments_task ON comments(task_id);"
+  fi
+  
+  # Add close_reason if missing
+  local has_close_reason=$(sql_exec "SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name='close_reason';")
+  if [[ "$has_close_reason" -eq 0 ]]; then
+    sql_exec "ALTER TABLE tasks ADD COLUMN close_reason TEXT DEFAULT '';"
+  fi
+  
+  # Add archived column if missing
+  local has_archived=$(sql_exec "SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name='archived';")
+  if [[ "$has_archived" -eq 0 ]]; then
+    sql_exec "ALTER TABLE tasks ADD COLUMN archived INTEGER DEFAULT 0;"
+  fi
+}
+
+# Create default statuses for a project (Linear-style)
+create_default_statuses() {
+  local proj="$1"
+  local ts=$(now)
+  sql_exec "INSERT OR IGNORE INTO statuses (project, name, type, position) VALUES
+    ('$proj', 'backlog', 'backlog', 0),
+    ('$proj', 'todo', 'unstarted', 1),
+    ('$proj', 'in-progress', 'started', 2),
+    ('$proj', 'done', 'completed', 3),
+    ('$proj', 'canceled', 'canceled', 4);"
+}
+
+ensure_project() {
+  local proj=$(get_project)
+  local exists=$(sql_exec "SELECT COUNT(*) FROM projects WHERE name='$proj';")
+  if [[ "$exists" -eq 0 ]]; then
+    sql_exec "INSERT INTO projects (name, path, created) VALUES ('$proj', '$PWD', '$(now)');"
+    create_default_statuses "$proj"
+  fi
+}
+
+get_default_status() {
+  local proj=$(get_project)
+  sql_exec "SELECT name FROM statuses WHERE project='$proj' AND type='backlog' ORDER BY position LIMIT 1;"
+}
+
+get_status_type() {
+  local proj=$(get_project)
+  local status="$1"
+  sql_exec "SELECT type FROM statuses WHERE project='$proj' AND name='$status';"
+}
+
+# Status color based on type
+status_color() {
+  local type="$1"
+  case "$type" in
+    backlog) echo "$GRAY" ;;
+    unstarted) echo "$YELLOW" ;;
+    started) echo "$BLUE" ;;
+    completed) echo "$GREEN" ;;
+    canceled) echo "$RED" ;;
+    *) echo "$NC" ;;
+  esac
+}
+
+JSON_OUTPUT=false
+ALL_PROJECTS=false
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --json|-j) JSON_OUTPUT=true; shift ;;
+    -a|--all) ALL_PROJECTS=true; shift ;;
+    *) break ;;
+  esac
+done
+
+cmd_init() {
+  ensure_db
+  ensure_project
+  local proj=$(get_project)
+  $JSON_OUTPUT && echo "{\"project\":\"$proj\",\"db\":\"$DB_FILE\"}" || info "project '$proj' ready"
+}
+
+cmd_create() {
+  ensure_db
+  ensure_project
+  local title="" priority=2 type="task" desc="" parent="" labels="" status=""
+  local proj=$(get_project)
+  
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -p|--priority) priority="$2"; shift 2 ;;
+      -t|--type) type="$2"; shift 2 ;;
+      -d|--desc) desc="$2"; shift 2 ;;
+      -s|--status) status="$2"; shift 2 ;;
+      --parent) parent="$2"; shift 2 ;;
+      -l|--labels) labels="$2"; shift 2 ;;
+      -*) die "unknown option: $1" ;;
+      *) title="$1"; shift ;;
+    esac
+  done
+  
+  [[ -z "$title" ]] && die "title required"
+  [[ -z "$status" ]] && status=$(get_default_status)
+  
+  local id
+  if [[ -n "$parent" ]]; then
+    local child_count=$(sql_exec "SELECT COUNT(*) FROM tasks WHERE parent='$parent';")
+    id="${parent}.$((child_count + 1))"
+  else
+    id=$(gen_id)
+  fi
+  
+  local ts=$(now)
+  sql_exec "INSERT INTO tasks (id, project, title, description, type, priority, status, parent, close_reason, created, updated) VALUES ('$id', '$proj', '${title//\'/\'\'}', '${desc//\'/\'\'}', '$type', $priority, '$status', '$parent', '', '$ts', '$ts');"
+  
+  if [[ -n "$labels" ]]; then
+    IFS=',' read -ra LBLS <<< "$labels"
+    for lbl in "${LBLS[@]}"; do
+      sql_exec "INSERT OR IGNORE INTO labels (task_id, label) VALUES ('$id', '$lbl');"
+    done
+  fi
+  
+  if $JSON_OUTPUT; then
+    sql_json "SELECT json_object('id', id, 'project', project, 'title', title, 'status', status, 'priority', priority) FROM tasks WHERE id='$id';"
+  else
+    echo -e "${GREEN}created${NC} $id: $title"
+  fi
+}
+
+cmd_list() {
+  ensure_db
+  local proj=$(get_project)
+  local where="t.archived=0"
+  local show_archived=false
+  
+  $ALL_PROJECTS || where="$where AND t.project='$proj'"
+  
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -s|--status) where="$where AND t.status='$2'"; shift 2 ;;
+      -p|--priority) where="$where AND t.priority=$2"; shift 2 ;;
+      -l|--label) where="$where AND t.id IN (SELECT task_id FROM labels WHERE label='$2')"; shift 2 ;;
+      -t|--type) where="$where AND s.type='$2'"; shift 2 ;;
+      --archived) where="${where/t.archived=0/t.archived=1}"; shift ;;
+      --all) where="${where/t.archived=0/1=1}"; shift ;;
+      *) shift ;;
+    esac
+  done
+  
+  if $JSON_OUTPUT; then
+    sql_json "SELECT json_group_array(json_object('id', t.id, 'project', t.project, 'title', t.title, 'type', t.type, 'priority', t.priority, 'status', t.status, 'status_type', s.type, 'parent', t.parent)) FROM tasks t LEFT JOIN statuses s ON t.project=s.project AND t.status=s.name WHERE $where ORDER BY s.position, t.priority, t.created;"
+  else
+    if $ALL_PROJECTS; then
+      sql_exec ".mode tabs
+.headers off
+SELECT t.id, t.status, s.type, 'P' || t.priority, t.project, t.title FROM tasks t LEFT JOIN statuses s ON t.project=s.project AND t.status=s.name WHERE $where ORDER BY t.project, s.position, t.priority, t.created;" | \
+        while IFS=$'\t' read -r id status stype pri proj title; do
+          local color=$(status_color "$stype")
+          printf "${BOLD}%-14s${NC} ${color}%-12s${NC} ${RED}%-4s${NC} ${CYAN}%-12s${NC} %s\n" "$id" "$status" "$pri" "$proj" "$title"
+        done
+    else
+      sql_exec ".mode tabs
+.headers off
+SELECT t.id, t.status, s.type, 'P' || t.priority, t.title FROM tasks t LEFT JOIN statuses s ON t.project=s.project AND t.status=s.name WHERE $where ORDER BY s.position, t.priority, t.created;" | \
+        while IFS=$'\t' read -r id status stype pri title; do
+          local color=$(status_color "$stype")
+          printf "${BOLD}%-14s${NC} ${color}%-12s${NC} ${RED}%-4s${NC} %s\n" "$id" "$status" "$pri" "$title"
+        done
+    fi
+  fi
+}
+
+cmd_ready() {
+  ensure_db
+  local proj=$(get_project)
+  local proj_filter="AND t.project='$proj'"
+  $ALL_PROJECTS && proj_filter=""
+  
+  # Ready = backlog/unstarted/started status types, no open blockers, not archived
+  local query="
+    SELECT t.id, t.title, t.priority, t.project, t.status, s.type FROM tasks t
+    LEFT JOIN statuses s ON t.project=s.project AND t.status=s.name
+    WHERE t.archived=0 AND s.type IN ('backlog', 'unstarted', 'started') $proj_filter
+    AND t.id NOT IN (
+      SELECT b.task_id FROM blockers b 
+      JOIN tasks bt ON b.blocker_id = bt.id
+      JOIN statuses bs ON bt.project=bs.project AND bt.status=bs.name
+      WHERE bs.type NOT IN ('completed', 'canceled')
+    )
+    ORDER BY s.position, t.priority, t.created
+  "
+  
+  if $JSON_OUTPUT; then
+    sql_json "SELECT json_group_array(json_object('id', id, 'title', title, 'priority', priority, 'project', project, 'status', status)) FROM ($query);"
+  else
+    sql_exec ".mode tabs
+.headers off
+$query" | while IFS=$'\t' read -r id title pri proj status stype; do
+      local color=$(status_color "$stype")
+      if $ALL_PROJECTS; then
+        printf "${GREEN}%-14s${NC} ${color}%-12s${NC} ${RED}P%-3s${NC} ${CYAN}%-12s${NC} %s\n" "$id" "$status" "$pri" "$proj" "$title"
+      else
+        printf "${GREEN}%-14s${NC} ${color}%-12s${NC} ${RED}P%-3s${NC} %s\n" "$id" "$status" "$pri" "$title"
+      fi
+    done
+  fi
+}
+
+cmd_show() {
+  ensure_db
+  local id="$1"
+  [[ -z "$id" ]] && die "id required"
+  
+  local exists=$(sql_exec "SELECT COUNT(*) FROM tasks WHERE id='$id';")
+  [[ "$exists" -eq 0 ]] && die "task $id not found"
+  
+  if $JSON_OUTPUT; then
+    sql_json "SELECT json_object('id', t.id, 'project', t.project, 'title', t.title, 'description', t.description, 'type', t.type, 'priority', t.priority, 'status', t.status, 'status_type', s.type, 'parent', t.parent, 'close_reason', t.close_reason, 'labels', COALESCE((SELECT json_group_array(label) FROM labels WHERE task_id=t.id), '[]'), 'blockers', COALESCE((SELECT json_group_array(blocker_id) FROM blockers WHERE task_id=t.id), '[]'), 'comments', COALESCE((SELECT json_group_array(json_object('id', id, 'body', body, 'created', created)) FROM comments WHERE task_id=t.id), '[]'), 'created', t.created, 'updated', t.updated) FROM tasks t LEFT JOIN statuses s ON t.project=s.project AND t.status=s.name WHERE t.id='$id';"
+  else
+    sql_exec ".mode line
+SELECT t.id, t.project, t.title, t.status, s.type as status_type, t.priority, t.type, t.description, t.close_reason, t.created, t.updated FROM tasks t LEFT JOIN statuses s ON t.project=s.project AND t.status=s.name WHERE t.id='$id';"
+    local labels=$(sql_exec "SELECT GROUP_CONCAT(label) FROM labels WHERE task_id='$id';")
+    [[ -n "$labels" ]] && echo "labels = $labels"
+    local blockers=$(sql_exec "SELECT GROUP_CONCAT(blocker_id) FROM blockers WHERE task_id='$id';")
+    [[ -n "$blockers" ]] && echo "blockers = $blockers"
+    
+    local comment_count=$(sql_exec "SELECT COUNT(*) FROM comments WHERE task_id='$id';")
+    if [[ "$comment_count" -gt 0 ]]; then
+      echo ""
+      echo "--- comments ---"
+      sql_exec ".mode list
+.separator ' | '
+SELECT created, body FROM comments WHERE task_id='$id' ORDER BY created;"
+    fi
+  fi
+}
+
+cmd_update() {
+  ensure_db
+  local id="$1"; shift
+  [[ -z "$id" ]] && die "id required"
+  
+  local sets="updated='$(now)'"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -s|--status) sets="$sets, status='$2'"; shift 2 ;;
+      -p|--priority) sets="$sets, priority=$2"; shift 2 ;;
+      -t|--title) sets="$sets, title='${2//\'/\'\'}'"; shift 2 ;;
+      -d|--desc) sets="$sets, description='${2//\'/\'\'}'"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  
+  sql_exec "UPDATE tasks SET $sets WHERE id='$id';"
+  $JSON_OUTPUT && cmd_show "$id" || echo -e "${GREEN}updated${NC} $id"
+}
+
+# Move task to a status
+cmd_move() {
+  ensure_db
+  local id="$1"
+  local status="$2"
+  [[ -z "$id" ]] && die "id required"
+  [[ -z "$status" ]] && die "status required"
+  
+  local proj=$(sql_exec "SELECT project FROM tasks WHERE id='$id';")
+  [[ -z "$proj" ]] && die "task $id not found"
+  
+  # Validate status exists
+  local status_exists=$(sql_exec "SELECT COUNT(*) FROM statuses WHERE project='$proj' AND name='$status';")
+  [[ "$status_exists" -eq 0 ]] && die "status '$status' not found in project '$proj'"
+  
+  local ts=$(now)
+  sql_exec "UPDATE tasks SET status='$status', updated='$ts' WHERE id='$id';"
+  $JSON_OUTPUT || echo -e "${GREEN}moved${NC} $id → $status"
+}
+
+cmd_close() {
+  ensure_db
+  local ts=$(now)
+  local ids=()
+  local reason=""
+  
+  for arg in "$@"; do
+    if [[ "$arg" =~ ^[a-z]{3}- ]] || [[ "$arg" =~ \. ]]; then
+      ids+=("$arg")
+    elif [[ ${#ids[@]} -eq 1 ]] && [[ -z "$reason" ]]; then
+      reason="$arg"
+    else
+      ids+=("$arg")
+    fi
+  done
+  
+  [[ ${#ids[@]} -eq 0 ]] && die "id required"
+  
+  for id in "${ids[@]}"; do
+    local proj=$(sql_exec "SELECT project FROM tasks WHERE id='$id';")
+    [[ -z "$proj" ]] && die "task $id not found"
+    
+    # Find the 'done' status (completed type)
+    local done_status=$(sql_exec "SELECT name FROM statuses WHERE project='$proj' AND type='completed' ORDER BY position LIMIT 1;")
+    [[ -z "$done_status" ]] && done_status="done"
+    
+    sql_exec "UPDATE tasks SET status='$done_status', close_reason='${reason//\'/\'\'}', updated='$ts' WHERE id='$id';"
+    if ! $JSON_OUTPUT; then
+      if [[ -n "$reason" ]]; then
+        echo -e "${GREEN}closed${NC} $id: $reason"
+      else
+        echo -e "${GREEN}closed${NC} $id"
+      fi
+    fi
+  done
+  
+  $JSON_OUTPUT && sql_json "SELECT json_group_array(json_object('id', id, 'status', status, 'close_reason', close_reason)) FROM tasks WHERE id IN ($(printf "'%s'," "${ids[@]}" | sed 's/,$//'));" || true
+}
+
+cmd_cancel() {
+  ensure_db
+  local ts=$(now)
+  local id="$1"
+  local reason="${2:-}"
+  
+  [[ -z "$id" ]] && die "id required"
+  
+  local proj=$(sql_exec "SELECT project FROM tasks WHERE id='$id';")
+  [[ -z "$proj" ]] && die "task $id not found"
+  
+  local cancel_status=$(sql_exec "SELECT name FROM statuses WHERE project='$proj' AND type='canceled' ORDER BY position LIMIT 1;")
+  [[ -z "$cancel_status" ]] && cancel_status="canceled"
+  
+  sql_exec "UPDATE tasks SET status='$cancel_status', close_reason='${reason//\'/\'\'}', updated='$ts' WHERE id='$id';"
+  $JSON_OUTPUT || echo -e "${RED}canceled${NC} $id"
+}
+
+cmd_reopen() {
+  ensure_db
+  local ts=$(now)
+  for id in "$@"; do
+    local proj=$(sql_exec "SELECT project FROM tasks WHERE id='$id';")
+    [[ -z "$proj" ]] && die "task $id not found"
+    
+    local backlog_status=$(sql_exec "SELECT name FROM statuses WHERE project='$proj' AND type='backlog' ORDER BY position LIMIT 1;")
+    [[ -z "$backlog_status" ]] && backlog_status="backlog"
+    
+    sql_exec "UPDATE tasks SET status='$backlog_status', close_reason='', updated='$ts' WHERE id='$id';"
+    $JSON_OUTPUT || echo -e "${GREEN}reopened${NC} $id"
+  done
+}
+
+cmd_archive() {
+  ensure_db
+  local ts=$(now)
+  
+  # No args: archive all completed/canceled in project
+  if [[ $# -eq 0 ]]; then
+    local proj=$(get_project)
+    local count=$(sql_exec "SELECT COUNT(*) FROM tasks t 
+                            JOIN statuses s ON t.project=s.project AND t.status=s.name
+                            WHERE t.project='$proj' AND s.type IN ('completed','canceled') AND t.archived=0;")
+    if [[ "$count" -eq 0 ]]; then
+      $JSON_OUTPUT || echo "nothing to archive"
+      return
+    fi
+    sql_exec "UPDATE tasks SET archived=1, updated='$ts' 
+              WHERE project='$proj' AND archived=0 
+              AND id IN (SELECT t.id FROM tasks t 
+                         JOIN statuses s ON t.project=s.project AND t.status=s.name
+                         WHERE t.project='$proj' AND s.type IN ('completed','canceled'));"
+    $JSON_OUTPUT || echo -e "${GRAY}archived${NC} $count tasks"
+    return
+  fi
+  
+  # With args: archive specific tasks
+  for id in "$@"; do
+    local exists=$(sql_exec "SELECT COUNT(*) FROM tasks WHERE id='$id';")
+    [[ "$exists" -eq 0 ]] && { echo -e "${RED}not found${NC} $id"; continue; }
+    
+    sql_exec "UPDATE tasks SET archived=1, updated='$ts' WHERE id='$id';"
+    $JSON_OUTPUT || echo -e "${GRAY}archived${NC} $id"
+  done
+}
+
+cmd_unarchive() {
+  ensure_db
+  local ts=$(now)
+  
+  for id in "$@"; do
+    local exists=$(sql_exec "SELECT COUNT(*) FROM tasks WHERE id='$id';")
+    [[ "$exists" -eq 0 ]] && { echo -e "${RED}not found${NC} $id"; continue; }
+    
+    sql_exec "UPDATE tasks SET archived=0, updated='$ts' WHERE id='$id';"
+    $JSON_OUTPUT || echo -e "${GREEN}unarchived${NC} $id"
+  done
+}
+
+cmd_archived() {
+  ensure_db
+  local proj=$(get_project)
+  
+  sql_exec "SELECT t.id, t.status, t.priority, t.title, t.updated
+            FROM tasks t
+            WHERE t.project='$proj' AND t.archived=1
+            ORDER BY t.updated DESC
+            LIMIT 100;" | while IFS='|' read -r id status prio title updated; do
+    echo -e "${GRAY}$id${NC} [$status] P$prio $title ${GRAY}$updated${NC}"
+  done
+}
+
+cmd_comment() {
+  ensure_db
+  local id="$1"
+  local body="$2"
+  [[ -z "$id" ]] && die "id required"
+  [[ -z "$body" ]] && die "comment body required"
+  
+  local exists=$(sql_exec "SELECT COUNT(*) FROM tasks WHERE id='$id';")
+  [[ "$exists" -eq 0 ]] && die "task $id not found"
+  
+  local ts=$(now)
+  sql_exec "INSERT INTO comments (task_id, body, created) VALUES ('$id', '${body//\'/\'\'}', '$ts');"
+  sql_exec "UPDATE tasks SET updated='$ts' WHERE id='$id';"
+  
+  $JSON_OUTPUT && sql_json "SELECT json_object('task_id', '$id', 'body', '${body//\'/\'\'}', 'created', '$ts');" || echo -e "${GREEN}commented${NC} on $id"
+}
+
+cmd_comments() {
+  ensure_db
+  local id="$1"
+  [[ -z "$id" ]] && die "id required"
+  
+  if $JSON_OUTPUT; then
+    sql_json "SELECT json_group_array(json_object('id', id, 'body', body, 'created', created)) FROM comments WHERE task_id='$id' ORDER BY created;"
+  else
+    sql_exec ".mode list
+.separator ' | '
+SELECT created, body FROM comments WHERE task_id='$id' ORDER BY created;"
+  fi
+}
+
+cmd_sub() {
+  ensure_db
+  ensure_project
+  local parent="$1"
+  shift
+  [[ -z "$parent" ]] && die "parent id required"
+  cmd_create --parent "$parent" "$@"
+}
+
+cmd_dep() {
+  ensure_db
+  local action="${1:-}"; shift || true
+  
+  case "$action" in
+    add)
+      local child="$1" parent="$2"
+      [[ -z "$child" || -z "$parent" ]] && die "usage: td dep add <child> <parent>"
+      sql_exec "INSERT OR IGNORE INTO blockers (task_id, blocker_id) VALUES ('$child', '$parent');"
+      sql_exec "UPDATE tasks SET updated='$(now)' WHERE id='$child';"
+      $JSON_OUTPUT || echo -e "${GREEN}$child${NC} blocked by ${YELLOW}$parent${NC}"
+      ;;
+    rm)
+      local child="$1" parent="$2"
+      sql_exec "DELETE FROM blockers WHERE task_id='$child' AND blocker_id='$parent';"
+      sql_exec "UPDATE tasks SET updated='$(now)' WHERE id='$child';"
+      ;;
+    tree)
+      local id="${1:-}"
+      [[ -z "$id" ]] && die "id required"
+      echo "$id: $(sql_exec "SELECT title FROM tasks WHERE id='$id';")"
+      sql_exec "SELECT '  ' || id || ': ' || title FROM tasks WHERE parent='$id' ORDER BY id;" | while read -r line; do
+        echo "$line"
+        local child_id=$(echo "$line" | sed 's/^ *//' | cut -d: -f1)
+        sql_exec "SELECT '    ' || id || ': ' || title FROM tasks WHERE parent='$child_id' ORDER BY id;"
+      done
+      ;;
+    *) die "usage: td dep <add|rm|tree> ..." ;;
+  esac
+}
+
+cmd_label() {
+  ensure_db
+  local action="${1:-}"; shift || true
+  
+  case "$action" in
+    add)
+      local id="$1" label="$2"
+      sql_exec "INSERT OR IGNORE INTO labels (task_id, label) VALUES ('$id', '$label');"
+      sql_exec "UPDATE tasks SET updated='$(now)' WHERE id='$id';"
+      $JSON_OUTPUT || echo -e "${GREEN}added${NC} label $label"
+      ;;
+    rm)
+      local id="$1" label="$2"
+      sql_exec "DELETE FROM labels WHERE task_id='$id' AND label='$label';"
+      ;;
+    list)
+      sql_exec "SELECT label FROM labels WHERE task_id='$1';"
+      ;;
+    list-all)
+      sql_exec "SELECT DISTINCT label FROM labels ORDER BY label;"
+      ;;
+    *) die "usage: td label <add|rm|list|list-all>" ;;
+  esac
+}
+
+cmd_status() {
+  ensure_db
+  ensure_project
+  local action="${1:-list}"; shift || true
+  local proj=$(get_project)
+  
+  case "$action" in
+    list)
+      if $JSON_OUTPUT; then
+        sql_json "SELECT json_group_array(json_object('name', name, 'type', type, 'position', position)) FROM statuses WHERE project='$proj' ORDER BY position;"
+      else
+        sql_exec ".mode tabs
+.headers off
+SELECT name, type, position FROM statuses WHERE project='$proj' ORDER BY position;" | \
+          while IFS=$'\t' read -r name type pos; do
+            local color=$(status_color "$type")
+            printf "${color}%-15s${NC} %-12s %s\n" "$name" "$type" "$pos"
+          done
+      fi
+      ;;
+    add)
+      local name="$1"
+      local type="${2:-unstarted}"
+      [[ -z "$name" ]] && die "status name required"
+      local max_pos=$(sql_exec "SELECT COALESCE(MAX(position), -1) FROM statuses WHERE project='$proj';")
+      sql_exec "INSERT INTO statuses (project, name, type, position) VALUES ('$proj', '$name', '$type', $((max_pos + 1)));"
+      $JSON_OUTPUT || echo -e "${GREEN}added${NC} status $name ($type)"
+      ;;
+    rm)
+      local name="$1"
+      [[ -z "$name" ]] && die "status name required"
+      sql_exec "DELETE FROM statuses WHERE project='$proj' AND name='$name';"
+      ;;
+    reorder)
+      local name="$1"
+      local pos="$2"
+      [[ -z "$name" || -z "$pos" ]] && die "usage: td status reorder <name> <position>"
+      sql_exec "UPDATE statuses SET position=$pos WHERE project='$proj' AND name='$name';"
+      ;;
+    *) die "usage: td status <list|add|rm|reorder>" ;;
+  esac
+}
+
+cmd_projects() {
+  ensure_db
+  local action="${1:-list}"; shift || true
+  
+  case "$action" in
+    list)
+      if $JSON_OUTPUT; then
+        sql_json "SELECT json_group_array(json_object('name', name, 'path', path, 'task_count', (SELECT COUNT(*) FROM tasks WHERE project=name), 'open_count', (SELECT COUNT(*) FROM tasks t JOIN statuses s ON t.project=s.project AND t.status=s.name WHERE t.project=projects.name AND s.type NOT IN ('completed','canceled')))) FROM projects ORDER BY name;"
+      else
+        sql_exec ".mode tabs
+.headers off
+SELECT p.name, p.path, (SELECT COUNT(*) FROM tasks t JOIN statuses s ON t.project=s.project AND t.status=s.name WHERE t.project=p.name AND s.type NOT IN ('completed','canceled')) || ' active' FROM projects p ORDER BY p.name;" | \
+          while IFS=$'\t' read -r name count path; do
+            printf "${BOLD}%-15s${NC} ${YELLOW}%-10s${NC} %s\n" "$name" "$count" "$path"
+          done
+      fi
+      ;;
+    current)
+      echo "$(get_project)"
+      ;;
+    *)
+      die "usage: td projects [list|current]"
+      ;;
+  esac
+}
+
+cmd_search() {
+  ensure_db
+  local query="$1"
+  local proj=$(get_project)
+  local proj_filter="AND project='$proj'"
+  $ALL_PROJECTS && proj_filter=""
+  
+  if $JSON_OUTPUT; then
+    sql_json "SELECT json_group_array(json_object('id', id, 'project', project, 'title', title, 'status', status)) FROM tasks WHERE (title LIKE '%$query%' OR description LIKE '%$query%') $proj_filter;"
+  else
+    sql_exec "SELECT id, project, title FROM tasks WHERE (title LIKE '%$query%' OR description LIKE '%$query%') $proj_filter;"
+  fi
+}
+
+cmd_compact() {
+  ensure_db
+  info "vacuuming database..."
+  sql_exec "VACUUM;"
+  info "done"
+}
+
+cmd_stats() {
+  ensure_db
+  local proj=$(get_project)
+  
+  if $ALL_PROJECTS; then
+    sql_json "SELECT json_object('total', (SELECT COUNT(*) FROM tasks), 'active', (SELECT COUNT(*) FROM tasks t JOIN statuses s ON t.project=s.project AND t.status=s.name WHERE s.type NOT IN ('completed','canceled')), 'completed', (SELECT COUNT(*) FROM tasks t JOIN statuses s ON t.project=s.project AND t.status=s.name WHERE s.type='completed'), 'projects', (SELECT COUNT(*) FROM projects));"
+  else
+    sql_json "SELECT json_object('project', '$proj', 'total', (SELECT COUNT(*) FROM tasks WHERE project='$proj'), 'active', (SELECT COUNT(*) FROM tasks t JOIN statuses s ON t.project=s.project AND t.status=s.name WHERE t.project='$proj' AND s.type NOT IN ('completed','canceled')), 'completed', (SELECT COUNT(*) FROM tasks t JOIN statuses s ON t.project=s.project AND t.status=s.name WHERE t.project='$proj' AND s.type='completed'));"
+  fi
+}
+
+cmd_export() {
+  ensure_db
+  local proj=$(get_project)
+  local proj_filter="WHERE t.project='$proj'"
+  $ALL_PROJECTS && proj_filter=""
+  
+  sql_json "SELECT json_object('id', t.id, 'project', t.project, 'title', t.title, 'description', t.description, 'type', t.type, 'priority', t.priority, 'status', t.status, 'parent', t.parent, 'close_reason', t.close_reason, 'labels', COALESCE((SELECT json_group_array(label) FROM labels WHERE task_id=t.id), '[]'), 'blockers', COALESCE((SELECT json_group_array(blocker_id) FROM blockers WHERE task_id=t.id), '[]'), 'comments', COALESCE((SELECT json_group_array(json_object('body', body, 'created', created)) FROM comments WHERE task_id=t.id), '[]'), 'created', t.created, 'updated', t.updated) FROM tasks t $proj_filter ORDER BY t.id;" | jq -c '.[]' 2>/dev/null || cat
+}
+
+cmd_import() {
+  ensure_db
+  local file="${1:--}"
+  info "importing from $file..."
+  
+  cat "$file" | while read -r line; do
+    local id=$(echo "$line" | jq -r '.id')
+    local project=$(echo "$line" | jq -r '.project // "default"')
+    local title=$(echo "$line" | jq -r '.title' | sed "s/'/''/g")
+    local desc=$(echo "$line" | jq -r '.description' | sed "s/'/''/g")
+    local type=$(echo "$line" | jq -r '.type')
+    local priority=$(echo "$line" | jq -r '.priority')
+    local status=$(echo "$line" | jq -r '.status')
+    local parent=$(echo "$line" | jq -r '.parent')
+    local close_reason=$(echo "$line" | jq -r '.close_reason // ""' | sed "s/'/''/g")
+    local created=$(echo "$line" | jq -r '.created')
+    local updated=$(echo "$line" | jq -r '.updated')
+    
+    # Ensure project + statuses exist
+    local proj_exists=$(sql_exec "SELECT COUNT(*) FROM projects WHERE name='$project';")
+    if [[ "$proj_exists" -eq 0 ]]; then
+      sql_exec "INSERT INTO projects (name, path, created) VALUES ('$project', '', '$created');"
+      create_default_statuses "$project"
+    fi
+    
+    sql_exec "INSERT OR REPLACE INTO tasks (id, project, title, description, type, priority, status, parent, close_reason, created, updated) VALUES ('$id', '$project', '$title', '$desc', '$type', $priority, '$status', '$parent', '$close_reason', '$created', '$updated');"
+    
+    sql_exec "DELETE FROM labels WHERE task_id='$id';"
+    echo "$line" | jq -r '.labels[]' 2>/dev/null | while read -r lbl; do
+      sql_exec "INSERT INTO labels VALUES ('$id', '$lbl');"
+    done
+    
+    sql_exec "DELETE FROM blockers WHERE task_id='$id';"
+    echo "$line" | jq -r '.blockers[]' 2>/dev/null | while read -r blk; do
+      sql_exec "INSERT INTO blockers VALUES ('$id', '$blk');"
+    done
+    
+    sql_exec "DELETE FROM comments WHERE task_id='$id';"
+    echo "$line" | jq -c '.comments[]' 2>/dev/null | while read -r cmt; do
+      local body=$(echo "$cmt" | jq -r '.body' | sed "s/'/''/g")
+      local cmt_created=$(echo "$cmt" | jq -r '.created')
+      sql_exec "INSERT INTO comments (task_id, body, created) VALUES ('$id', '$body', '$cmt_created');"
+    done
+  done
+  
+  info "import complete"
+}
+
+cmd_help() {
+  cat << 'EOF'
+td - Todo tracker for AI agents
+
+Global database at ~/.td/tasks.db with Linear-style workflow states.
+
+USAGE:
+  td [--json] [-a|--all] <command> [args]
+
+TASK COMMANDS:
+  init                    Register current directory as project
+  create <title> [opts]   Create task (-p priority, -s status, -t type, -d desc, --parent id, -l labels)
+  sub <parent> <title>    Create subtask (epic pattern: id.1, id.1.1)
+  list [filters]          List tasks (-s status, -p priority, -l label, -t type, --archived, --all)
+  ready                   Unblocked tasks in unstarted/started states
+  show <id>               Show task details
+  update <id> [opts]      Update task fields
+  move <id> <status>      Move task to status
+  close <id> [reason]     Move to 'done' with optional reason
+  cancel <id> [reason]    Move to 'canceled'
+  reopen <id>             Move back to 'backlog'
+  archive [id...]         Archive task(s), or all completed/canceled if no args
+  unarchive <id...>       Restore archived task(s)
+  archived                List archived tasks
+
+WORKFLOW COMMANDS:
+  status list             Show project statuses
+  status add <n> [type]   Add status (types: backlog, unstarted, started, completed, canceled)
+  status rm <name>        Remove status
+  status reorder <n> <p>  Set status position
+
+OTHER COMMANDS:
+  comment <id> <text>     Add comment
+  comments <id>           List comments
+  dep add <c> <p>         Add blocker
+  dep rm <c> <p>          Remove blocker
+  dep tree <id>           Show descendants
+  label add <id> <l>      Add label
+  projects                List projects
+  search <query>          Search tasks
+  stats                   Statistics
+  export / import         JSONL export/import
+
+DEFAULT STATUSES:
+  backlog      (backlog)    → Created tasks start here
+  todo         (unstarted)  → Scheduled
+  in-progress  (started)    → Active work
+  done         (completed)  → Finished
+  canceled     (canceled)   → Won't do
+
+FLAGS:
+  --json, -j              JSON output
+  -a, --all               All projects
+EOF
+}
+
+case "${1:-help}" in
+  init) shift; cmd_init "$@" ;;
+  create|add) shift; cmd_create "$@" ;;
+  sub) shift; cmd_sub "$@" ;;
+  list|ls) shift; cmd_list "$@" ;;
+  ready) shift; cmd_ready "$@" ;;
+  show) shift; cmd_show "$@" ;;
+  update) shift; cmd_update "$@" ;;
+  move|mv) shift; cmd_move "$@" ;;
+  close|done) shift; cmd_close "$@" ;;
+  cancel) shift; cmd_cancel "$@" ;;
+  reopen) shift; cmd_reopen "$@" ;;
+  archive) shift; cmd_archive "$@" ;;
+  unarchive) shift; cmd_unarchive "$@" ;;
+  archived) shift; cmd_archived "$@" ;;
+  comment) shift; cmd_comment "$@" ;;
+  comments) shift; cmd_comments "$@" ;;
+  dep) shift; cmd_dep "$@" ;;
+  label) shift; cmd_label "$@" ;;
+  status) shift; cmd_status "$@" ;;
+  projects) shift; cmd_projects "$@" ;;
+  search) shift; cmd_search "$@" ;;
+  compact) shift; cmd_compact "$@" ;;
+  export) shift; cmd_export "$@" ;;
+  import) shift; cmd_import "$@" ;;
+  stats) shift; cmd_stats "$@" ;;
+  help|--help|-h) cmd_help ;;
+  version|--version) echo "td $VERSION (sqlite)" ;;
+  *) die "unknown command: $1" ;;
+esac

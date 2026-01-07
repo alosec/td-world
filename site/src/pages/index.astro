@@ -73,11 +73,13 @@
         padding: 1rem 1.25rem;
         margin-bottom: 3rem;
         position: relative;
+        overflow-x: auto;
       }
       
       .install-box code {
         color: var(--green);
         word-break: break-all;
+        font-size: 0.85rem;
       }
       
       .install-box .prompt {
@@ -88,8 +90,7 @@
       .copy-btn {
         position: absolute;
         right: 0.75rem;
-        top: 50%;
-        transform: translateY(-50%);
+        top: 0.75rem;
         background: var(--border);
         border: none;
         color: var(--muted);
@@ -221,10 +222,23 @@
       }
       
       @media (max-width: 600px) {
+        html { font-size: 14px; }
         body { padding: 2rem 1rem; }
-        .cmd { min-width: auto; margin-bottom: 0.25rem; }
-        .cmd-row { flex-direction: column; }
-        .stats { gap: 1.5rem; }
+        .install-box { padding: 0.75rem 1rem; padding-right: 4rem; }
+        .install-box code { font-size: 0.75rem; }
+        .copy-btn { top: 0.5rem; right: 0.5rem; }
+        .features { grid-template-columns: 1fr 1fr; gap: 0.75rem; }
+        .feature { padding: 0.75rem; }
+        .cmd { min-width: auto; margin-bottom: 0.25rem; font-size: 0.8rem; }
+        .cmd-row { flex-direction: column; padding: 0.5rem 0.75rem; }
+        .cmd-desc { font-size: 0.75rem; }
+        .stats { gap: 1.5rem; justify-content: space-between; }
+        .stat-value { font-size: 1.25rem; }
+        footer { gap: 1rem; }
+      }
+      
+      @media (max-width: 400px) {
+        .features { grid-template-columns: 1fr; }
       }
     </style>
   </head>

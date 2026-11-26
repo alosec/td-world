@@ -20,13 +20,23 @@ fi
 die() { echo -e "${RED}error:${NC} $1" >&2; exit 1; }
 info() { echo -e "${BLUE}info:${NC} $1" >&2; }
 
+# Optional global settings in ~/.td/config (key=value lines):
+#   project=NAME  file every task under NAME, from any directory
+#   prefix=ABC    use ABC- for new task IDs
+# TD_PROJECT / TD_PREFIX env vars override the file.
+CONFIG_FILE="$TD_DIR/config"
+config_get() {
+  [[ -f "$CONFIG_FILE" ]] && sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*//p" "$CONFIG_FILE" | tail -1
+}
+
 get_project() {
-  echo t49  # one project for every directory
+  echo "${TD_PROJECT:-$(config_get project)}" | grep . || basename "$PWD"
 }
 
 gen_id() {
   local proj=$(get_project)
-  local prefix=t49  # always t49, regardless of project
+  local prefix="${TD_PREFIX:-$(config_get prefix)}"
+  [[ -n "$prefix" ]] || prefix=$(echo "$proj" | head -c 3 | tr '[:upper:]' '[:lower:]')
   echo "${prefix}-$(echo "$(date +%s%N)$$" | sha256sum | head -c 4)"
 }
 

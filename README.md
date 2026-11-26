@@ -33,4 +33,4 @@ tv -r        # Ready (unblocked) tasks
 
 ## Database
 
-Tasks stored in `~/.td/tasks.db`. Project-scoped by current directory.
+Tasks stored in `~/.td/tasks.db`. All tasks file under one project (`t49`) from any directory, with `t49-` IDs.

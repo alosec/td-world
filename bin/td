@@ -21,12 +21,12 @@ die() { echo -e "${RED}error:${NC} $1" >&2; exit 1; }
 info() { echo -e "${BLUE}info:${NC} $1" >&2; }
 
 get_project() {
-  echo "${TD_PROJECT:-$(basename "$PWD")}"
+  echo t49  # one project for every directory
 }
 
 gen_id() {
   local proj=$(get_project)
-  local prefix=$(echo "$proj" | head -c 3 | tr '[:upper:]' '[:lower:]')
+  local prefix=t49  # always t49, regardless of project
   echo "${prefix}-$(echo "$(date +%s%N)$$" | sha256sum | head -c 4)"
 }
 
